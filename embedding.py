@@ -86,6 +86,19 @@ def update_last_run_time(client, last_timestamp):
 # ---------------------------------------------------------
 # 2. Extract: MySQL에서 데이터 가져오기
 # ---------------------------------------------------------
+def fetch_user_from_mysql(username):
+    try:
+        # 실제 테이블 구조에 맞게 쿼리 수정
+        # content 컬럼에는 HTML이 들어있다고 가정
+        query = "SELECT us_id FROM db1_account.user where us_username=%(username)s"
+        
+        df = pd.read_sql(query, engine, params={'username': username})
+        return df.iloc[0].to_dict()
+    except Exception as e:
+        logger.warning(f"MySQL 연결 또는 쿼리 오류: {e}")
+        return None
+
+
 def fetch_notes_from_mysql(last_run_time):
     try:
         # 실제 테이블 구조에 맞게 쿼리 수정

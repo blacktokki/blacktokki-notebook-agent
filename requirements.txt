@@ -13,5 +13,6 @@ sqlalchemy
 pymysql
 sentence-transformers
 langchain-text-splitters
-fastmcp
+fastmcp>=2.9.0
+pyjwt
 markdownify
