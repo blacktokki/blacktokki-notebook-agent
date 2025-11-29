@@ -1,0 +1,17 @@
+# Pytorch CPU 버전 다운로드 주소 지정
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# torch를 명시적으로 적어주어야 위 주소에서 먼저 찾습니다.
+torch
+torchvision
+torchaudio
+
+chromadb>=0.4.0
+python-dotenv
+pandas
+sqlalchemy
+pymysql
+sentence-transformers
+langchain-text-splitters
+fastmcp
+markdownify
