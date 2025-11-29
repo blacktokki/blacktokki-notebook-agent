@@ -1,20 +1,26 @@
+import asyncio
+from asyncio.log import logger
 import os
 import re
 import sys
 import json
-from dotenv import load_dotenv
 import pandas as pd
+from dotenv import load_dotenv
 import chromadb
 from chromadb.utils import embedding_functions
+from contextlib import asynccontextmanager
 from sqlalchemy import create_engine
 import markdownify
-from datetime import datetime
+from datetime import datetime, time
+from fastmcp.utilities.logging import get_logger
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 # ---------------------------------------------------------
 # 1. 설정 (Configuration)
 # ---------------------------------------------------------
+
 load_dotenv()
+
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 MODEL_NAME = os.getenv("MODEL_NAME", "intfloat/multilingual-e5-base")
@@ -26,6 +32,15 @@ DB_CONNECTION_STR = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@127.0.0.1:3306/db1
 VECTOR_DB_PATH = "./chroma_db_store"
 COLLECTION_NAME = "note_collection"
 STATE_COLLECTION_NAME = "system_state"
+
+logger = get_logger(__name__)
+
+logger.info("MySQL 데이터베이스 연결 중...")
+try:
+    engine = create_engine(DB_CONNECTION_STR)
+except Exception as e:
+    logger.warning(f"MySQL 연결 오류: {e}")
+    raise e
 
 # ---------------------------------------------------------
 # 1-1. 상태 관리 (State Management)
@@ -43,11 +58,10 @@ def get_last_run_time(client):
     # 데이터가 있으면 메타데이터에서 timestamp 반환
     if result['ids']:
         last_run = result['metadatas'][0].get('last_run_at')
-        print(f"[State] 마지막 실행 기록 발견: {last_run}")
         return last_run
     
     # 없으면 초기값 반환
-    print("[State] 실행 기록 없음. 초기화 모드로 동작.")
+    logger.info("[State] 실행 기록 없음. 초기화 모드로 동작.")
     return '1970-01-01 00:00:00'
 
 def update_last_run_time(client, last_timestamp):
@@ -67,25 +81,22 @@ def update_last_run_time(client, last_timestamp):
         documents=["This is a system state record."], 
         metadatas={"last_run_at": last_timestamp}
     )
-    print(f"[State] 실행 시간 업데이트 완료: {last_timestamp}")
+    logger.info(f"[State] 실행 시간 업데이트 완료: {last_timestamp}")
 
 # ---------------------------------------------------------
 # 2. Extract: MySQL에서 데이터 가져오기
 # ---------------------------------------------------------
 def fetch_notes_from_mysql(last_run_time):
-    print("MySQL 데이터베이스 연결 중...")
     try:
-        engine = create_engine(DB_CONNECTION_STR)
-        
         # 실제 테이블 구조에 맞게 쿼리 수정
         # content 컬럼에는 HTML이 들어있다고 가정
         query = "SELECT co_id, us_id, co_title, co_description, co_updated FROM content where co_updated > %(last_run)s and co_type='NOTE'"
         
         df = pd.read_sql(query, engine, params={'last_run': last_run_time})
-        print(f"DB에서 {len(df)}개의 노트를 가져왔습니다.")
+        logger.info(f"DB에서 {last_run_time} 이후에 수정된 {len(df)}개의 노트를 가져왔습니다.")
         return df
     except Exception as e:
-        print(f"MySQL 연결 또는 쿼리 오류: {e}")
+        logger.warning(f"MySQL 연결 또는 쿼리 오류: {e}")
         return pd.DataFrame()
 
 # ---------------------------------------------------------
@@ -157,8 +168,8 @@ def process_content(original_id, user_id, title, html_content, created_at):
         # 헤더 경로 문자열 생성
         header_path = "\n".join([f"{'#' * int(k[1])} {v}" for k, v in header_metadata.items()]) if header_metadata else ""
         text = f"# {title}\n{header_path}\n{chunk_text}"  # 임베딩될 텍스트
-        print("================================")
-        print(text)
+        logger.debug("================================")
+        logger.debug(text)
 
         processed_data.append({
             "id": f"{original_id}_{idx}", # 유니크 ID 생성
@@ -201,13 +212,13 @@ def run_pipeline():
 
     # [Step 4] 기존 청크 삭제 (Clean up)
     if updated_original_ids:
-        print(f"업데이트 대상 문서 {len(updated_original_ids)}개의 기존 벡터 삭제 중...")
+        logger.info(f"업데이트 대상 문서 {len(updated_original_ids)}개의 기존 벡터 삭제 중...")
         # where 절을 사용하여 삭제
         for original_id in updated_original_ids:
              note_collection.delete(where={"original_id": original_id})
 
     # [Step 5] 데이터 변환
-    print("새 데이터 변환 중...")
+    logger.info("새 데이터 변환 중...")
     for _, row in df.iterrows():
         chunks = process_content(row['co_id'], row['us_id'], row['co_title'], row['co_description'], row['co_updated'])
         for chunk in chunks:
@@ -218,9 +229,9 @@ def run_pipeline():
     # [Step 6] 데이터 저장
     if documents:
         batch_size = 100
-        print(f"총 {len(documents)}개의 청크를 {batch_size}개씩 나누어 저장합니다.")
+        logger.info(f"총 {len(documents)}개의 청크를 {batch_size}개씩 나누어 저장합니다.")
         for i in range(0, len(documents), batch_size):
-            print(f"  - 청크 {i} ~ {min(i+batch_size, len(documents))} 저장 중...")
+            logger.info(f"  - 청크 {i} ~ {min(i+batch_size, len(documents))} 저장 중...")
             end = i + batch_size
             note_collection.upsert(
                 documents=documents[i:end],
@@ -232,7 +243,38 @@ def run_pipeline():
         max_updated_at = df['co_updated'].max()
         update_last_run_time(client, max_updated_at)
         
-        print(f"작업 완료. 총 {len(documents)}개 청크 저장됨.")
+        logger.info(f"작업 완료. 총 {len(documents)}개 청크 저장됨.")
 
-if __name__ == "__main__":
-    run_pipeline()
+
+async def embedding():
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            # [핵심] 동기 함수(run_pipeline)를 별도 스레드 풀에서 실행
+            # 이렇게 해야 메인 루프가 멈추지 않아 cancel() 신호를 받을 수 있음
+            await loop.run_in_executor(None, run_pipeline)
+            await asyncio.sleep(5)
+            
+    except asyncio.CancelledError:
+        # task.cancel()이 호출되면 이 블록이 실행됨
+        logger.warning("Embedding task was cancelled via signal!")
+        raise  # 에러를 다시 던져줘야 완전히 종료됨
+
+
+@asynccontextmanager
+async def server_lifespan(server):
+    # [시작 시 실행]
+    logger.info("Background embedding task started.")
+    # 백그라운드 작업 시작 (반드시 task 변수에 할당해두어야 GC되지 않음)
+    task = asyncio.create_task(embedding())
+    
+    yield  # 여기서 서버가 실행됨 (대기)
+    
+    # [종료 시 실행]
+    logger.info("Stopping background task...")
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Stop background task completed.")

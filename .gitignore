@@ -1,2 +1,3 @@
 chroma_db_store/
 .env
+__pycache__/
