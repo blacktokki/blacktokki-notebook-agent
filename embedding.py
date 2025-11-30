@@ -11,7 +11,7 @@ from chromadb.utils import embedding_functions
 from contextlib import asynccontextmanager
 from sqlalchemy import create_engine
 import markdownify
-from datetime import datetime, time
+from datetime import datetime
 from fastmcp.utilities.logging import get_logger
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
@@ -42,16 +42,16 @@ except Exception as e:
     logger.warning(f"MySQL 연결 오류: {e}")
     raise e
 
+client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
+state_collection = client.get_or_create_collection(name=STATE_COLLECTION_NAME)
+
 # ---------------------------------------------------------
 # 1-1. 상태 관리 (State Management)
 # ---------------------------------------------------------
-def get_last_run_time(client):
+def get_last_run_time():
     """
     system_state 컬렉션에서 마지막 실행 시간을 조회합니다.
     """
-    # 상태 관리용 컬렉션 가져오기 (없으면 생성)
-    state_collection = client.get_or_create_collection(name=STATE_COLLECTION_NAME)
-    
     # ID가 'etl_status'인 데이터 조회
     result = state_collection.get(ids=["etl_status"])
     
@@ -64,12 +64,10 @@ def get_last_run_time(client):
     logger.info("[State] 실행 기록 없음. 초기화 모드로 동작.")
     return '1970-01-01 00:00:00'
 
-def update_last_run_time(client, last_timestamp):
+def update_last_run_time(last_timestamp):
     """
     system_state 컬렉션에 마지막 실행 시간을 저장(덮어쓰기)합니다.
     """
-    state_collection = client.get_or_create_collection(name=STATE_COLLECTION_NAME)
-    
     # datetime 객체를 문자열로 변환
     if isinstance(last_timestamp, (pd.Timestamp, datetime)):
         last_timestamp = str(last_timestamp)
@@ -82,6 +80,25 @@ def update_last_run_time(client, last_timestamp):
         metadatas={"last_run_at": last_timestamp}
     )
     logger.info(f"[State] 실행 시간 업데이트 완료: {last_timestamp}")
+
+
+def get_pat_jti(user_id):
+    result = state_collection.get(where={"sub": str(user_id)})
+    return result['metadatas']
+
+
+def add_pat_jti(user_id, payload):
+    metadata = dict(payload, **{"iat": payload["iat"].isoformat(), "exp": payload["exp"].isoformat()})
+    state_collection.upsert(
+        ids=[f"jti_{user_id}_{payload['jti']}"],
+        documents=["_"], 
+        metadatas=metadata,
+    )
+
+
+def delete_pat_jti(user_id, jti):
+    state_collection.delete(where={"sub": str(user_id), "jti": jti})
+
 
 # ---------------------------------------------------------
 # 2. Extract: MySQL에서 데이터 가져오기
@@ -203,10 +220,8 @@ def process_content(original_id, user_id, title, html_content, created_at):
 # 4. Main Pipeline
 # ---------------------------------------------------------
 def run_pipeline():
-    client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
-
     # A. 마지막 실행 시간 로드
-    last_run = get_last_run_time(client)
+    last_run = get_last_run_time()
     df = fetch_notes_from_mysql(last_run)
     if df.empty:
         return
@@ -254,7 +269,7 @@ def run_pipeline():
         
         # [Step 7] 상태값 업데이트 (DB 내부 컬렉션 이용)
         max_updated_at = df['co_updated'].max()
-        update_last_run_time(client, max_updated_at)
+        update_last_run_time(max_updated_at)
         
         logger.info(f"작업 완료. 총 {len(documents)}개 청크 저장됨.")
 

@@ -1,5 +1,4 @@
 import os
-import jwt
 from dotenv import load_dotenv
 from fastmcp import FastMCP, Context
 from fastmcp.utilities.logging import get_logger
@@ -7,14 +6,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 import chromadb
 from chromadb.utils import embedding_functions
-from embedding import fetch_user_from_mysql, server_lifespan
-from fastmcp.server.middleware import Middleware, MiddlewareContext
+
+from embedding import delete_pat_jti, get_pat_jti, server_lifespan
+from mcp_auth import AuthenticationMiddleware, authenticate, create_pat_token
 
 load_dotenv()
 
 # --- 설정 ---
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = "HS256"
 MODEL_NAME = os.getenv("MODEL_NAME", "intfloat/multilingual-e5-base")
 VECTOR_DB_PATH = "./chroma_db_store"
 COLLECTION_NAME = "note_collection"
@@ -43,52 +41,7 @@ def _search(user_id: int, query: str) -> str:
     except Exception as e:
         return {"error": f"검색 중 오류 발생: {str(e)}"}
 
-
-def authenticate(request:Request):
-    auth_header = request.headers.get("Authorization")
-    # 1. 헤더 존재 여부 및 스키마 확인
-    if not auth_header or not (auth_header.startswith("JWT ") or auth_header.startswith("Bearer ")):
-        return JSONResponse(
-            status_code=401, 
-            content={"detail": "Missing or invalid Authorization header"}
-        )
-
-    try:
-        # 2. 토큰 추출 ("JWT/Bearer <token>" 형식)
-        token = auth_header.split(" ")[1]
-
-        # 3. 토큰 디코딩 및 서명 검증
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-
-        # 4. 검증 성공 시: request.state에 사용자 정보 저장
-        # (이후 라우터나 툴에서 request.state.user로 접근 가능)
-        request.state.user = fetch_user_from_mysql(payload["sub"])
-        if request.state.user is None:
-            return JSONResponse(
-                status_code=401, 
-                content={"detail": "User not found"}
-            )
-    except jwt.ExpiredSignatureError:
-        return JSONResponse(
-            status_code=401, 
-            content={"detail": "Token has expired"}
-        )
-    except jwt.InvalidTokenError:
-        return JSONResponse(
-            status_code=401, 
-            content={"detail": "Invalid token"}
-        )
-    return None
-
-
 # MCP 서버 생성
-class AuthenticationMiddleware(Middleware):
-    async def on_request(self, context: MiddlewareContext, call_next):
-        response = authenticate(context.request)
-        if response:
-            return response
-        return await call_next(context)
-
 mcp = FastMCP("MyNoteSearcher", middleware=[AuthenticationMiddleware()], lifespan=server_lifespan)
 
 @mcp.tool()
@@ -132,4 +85,27 @@ def search_notes(request: Request):
         logger.info(f"내용: \n{results['documents'][0][i]}\n")
         logger.info("-" * 20)
     return JSONResponse(results)
-    
+
+
+@mcp.custom_route("/access-token", methods=["GET", "POST"])
+def access_token(request: Request):
+    response = authenticate(request)
+    if response:
+        return response
+    us_id = request.state.user["us_id"]
+
+    if request.method == "GET":
+        result = get_pat_jti(us_id)
+    else:
+        result = create_pat_token(us_id)
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/access-token/{jti}", methods=["DELETE"])
+def access_token(request: Request):
+    response = authenticate(request)
+    if response:
+        return response
+    us_id = request.state.user["us_id"]
+    delete_pat_jti(us_id, request.path_params["jti"])
+    return JSONResponse({})
