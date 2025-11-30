@@ -16,3 +16,4 @@ langchain-text-splitters
 fastmcp>=2.9.0
 pyjwt
 markdownify
+py-eureka-client

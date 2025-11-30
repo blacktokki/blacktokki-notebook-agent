@@ -1,6 +1,5 @@
 import asyncio
 from asyncio.log import logger
-import os
 import re
 import sys
 import json
@@ -8,23 +7,16 @@ import pandas as pd
 from dotenv import load_dotenv
 import chromadb
 from chromadb.utils import embedding_functions
-from contextlib import asynccontextmanager
 from sqlalchemy import create_engine
 import markdownify
 from datetime import datetime
 from fastmcp.utilities.logging import get_logger
-from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+
+from env import DB_USER, DB_PASSWORD, MODEL_NAME, TEXT_PREFIX
 
 # ---------------------------------------------------------
 # 1. 설정 (Configuration)
 # ---------------------------------------------------------
-
-load_dotenv()
-
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-MODEL_NAME = os.getenv("MODEL_NAME", "intfloat/multilingual-e5-base")
-TEXT_PREFIX =  os.getenv("TEXT_PREFIX", "passage: ")
 
 # MySQL 연결 문자열 (mysql+pymysql://사용자:비번@호스트:포트/DB명)
 DB_CONNECTION_STR = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@127.0.0.1:3306/db1_notebook"
@@ -150,6 +142,7 @@ def process_content(original_id, user_id, title, html_content, created_at):
     # [Step B] 1차 청킹: 헤더(Header) 기준 분리
     # 문서를 논리적 섹션(챕터)으로 나눕니다.
     max_level = 1
+    from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
     for i in range(1, 7):
         headers_to_split_on = [
             ("#" * int(i2), "h" + str(i2))
@@ -288,21 +281,3 @@ async def embedding():
         logger.warning("Embedding task was cancelled via signal!")
         raise  # 에러를 다시 던져줘야 완전히 종료됨
 
-
-@asynccontextmanager
-async def server_lifespan(server):
-    # [시작 시 실행]
-    logger.info("Background embedding task started.")
-    # 백그라운드 작업 시작 (반드시 task 변수에 할당해두어야 GC되지 않음)
-    task = asyncio.create_task(embedding())
-    
-    yield  # 여기서 서버가 실행됨 (대기)
-    
-    # [종료 시 실행]
-    logger.info("Stopping background task...")
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    logger.info("Stop background task completed.")

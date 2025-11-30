@@ -1,19 +1,14 @@
-import os
 import jwt
 import datetime
 import uuid
-from dotenv import load_dotenv
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from fastmcp.server.dependencies import get_http_request
 
+from env import SECRET_KEY, PAT_SECRET_KEY, PAT_EXPIRATION_DAYS
 from embedding import fetch_user_from_mysql, add_pat_jti, get_pat_jti
 
-load_dotenv()
-
-SECRET_KEY = os.getenv("SECRET_KEY")
-PAT_SECRET_KEY = os.getenv("PAT_SECRET_KEY")
-PAT_EXPIRATION_DAYS = os.getenv("PAT_EXPIRATION_DAYS", 7)
 ALGORITHM = "HS256"
 
 def authenticate(request:Request):
@@ -70,9 +65,11 @@ def authenticate(request:Request):
 
 class AuthenticationMiddleware(Middleware):
     async def on_request(self, context: MiddlewareContext, call_next):
-        response = authenticate(context.request)
-        if response:
-            return response
+        request = get_http_request()
+        if request:
+            response = authenticate(request)
+            if response:
+                return response
         return await call_next(context)
     
 

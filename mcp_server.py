@@ -1,25 +1,22 @@
 import os
+import asyncio
 from dotenv import load_dotenv
-from fastmcp import FastMCP, Context
+from contextlib import asynccontextmanager
+from fastmcp import FastMCP, Context, settings
 from fastmcp.utilities.logging import get_logger
+from fastmcp.server.dependencies import get_http_request
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 import chromadb
 from chromadb.utils import embedding_functions
+from py_eureka_client import eureka_client
 
-from embedding import delete_pat_jti, get_pat_jti, server_lifespan
+from env import MODEL_NAME, QUERY_PREFIX
+from embedding import COLLECTION_NAME, VECTOR_DB_PATH, delete_pat_jti, embedding, get_pat_jti
 from mcp_auth import AuthenticationMiddleware, authenticate, create_pat_token
 
 load_dotenv()
-
-# --- 설정 ---
-MODEL_NAME = os.getenv("MODEL_NAME", "intfloat/multilingual-e5-base")
-VECTOR_DB_PATH = "./chroma_db_store"
-COLLECTION_NAME = "note_collection"
-QUERY_PREFIX =  os.getenv("QUERY_PREFIX", "query: ")
-
 logger = get_logger(__name__)
-
 
 def _search(user_id: int, query: str) -> str:
     try:
@@ -33,7 +30,7 @@ def _search(user_id: int, query: str) -> str:
         results = collection.query(
             query_texts=[f"{QUERY_PREFIX}{query}"],
             where={"user_id": user_id},
-            n_results=3  # 상위 3개 추출
+            n_results=5  # 상위 5개 추출
         )
 
         return results
@@ -42,10 +39,37 @@ def _search(user_id: int, query: str) -> str:
         return {"error": f"검색 중 오류 발생: {str(e)}"}
 
 # MCP 서버 생성
+@asynccontextmanager
+async def server_lifespan(server:FastMCP):
+    # [시작 시 실행]
+    logger.info("Background embedding task started.")
+    # 백그라운드 작업 시작 (반드시 task 변수에 할당해두어야 GC되지 않음)
+    await eureka_client.init_async(
+        eureka_server="http://127.0.0.1:8761",
+        app_name="agent",
+        instance_host=settings.get_setting("host"),
+        instance_port=settings.get_setting("port")
+    )
+    
+    task = asyncio.create_task(embedding())
+    
+    yield  # 여기서 서버가 실행됨 (대기)
+    
+    # [종료 시 실행]
+    logger.info("Stopping background task...")
+    await eureka_client.stop_async()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Stop background task completed.")
+
+
 mcp = FastMCP("MyNoteSearcher", middleware=[AuthenticationMiddleware()], lifespan=server_lifespan)
 
 @mcp.tool()
-def search_notes_tool(query: str, ctx: Context) -> str:
+def search_notes_tool(query: str) -> str:
     """
     사용자의 질문과 관련된 노트를 데이터베이스에서 검색합니다.
     Args:
@@ -53,7 +77,7 @@ def search_notes_tool(query: str, ctx: Context) -> str:
     Returns:
         검색된 노트 내용들을 문자열로 반환
     """
-    results = _search(ctx.request.state.user["us_id"], query)
+    results = _search(get_http_request().state.user["us_id"], query)
     if results.get("error"):
         return results["error"]
     if not results['documents'][0]:
