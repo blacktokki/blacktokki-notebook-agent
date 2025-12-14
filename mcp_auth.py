@@ -1,13 +1,14 @@
+import hashlib
 import jwt
-import datetime
 import uuid
+from datetime import datetime
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from fastmcp.server.dependencies import get_http_request
 
-from env import SECRET_KEY, PAT_SECRET_KEY, PAT_EXPIRATION_DAYS
-from embedding import fetch_user_from_mysql, add_pat_jti, get_pat_jti
+from env import SECRET_KEY
+from notebook_db import fetch_token_from_db, fetch_user_from_db
 
 ALGORITHM = "HS256"
 
@@ -26,39 +27,44 @@ def authenticate(request:Request):
             status_code=401, 
             content={"detail": "Invalid Authorization header"}
         )
-    try:
-        if prefix == "PAT":
-            # PAT 토큰 검증
-            payload = jwt.decode(token, PAT_SECRET_KEY, algorithms=[ALGORITHM])
-            jti_list = [i['jti'] for i in get_pat_jti(int(payload["sub"]))]
-            if payload["jti"] not in jti_list:
-                return JSONResponse(
-                    status_code=401, 
-                    content={"detail": "Invalid PAT token"}
-                )
-            # 검증 성공 시: request.state에 사용자 정보 저장
-            request.state.user = {"us_id": int(payload["sub"])}
-        else:
+    if prefix == "PAT":
+        # PAT 토큰 검증
+        hashed_object = hashlib.sha256(token.encode('utf-8'))
+        calculated_hash = hashed_object.hexdigest()
+        stored_token = fetch_token_from_db(calculated_hash)            
+        if stored_token is None:
+            return JSONResponse(
+                status_code=401, 
+                content={"detail": "Invalid PAT token"}
+            )
+        if datetime.fromisoformat(str(stored_token['pa_expired'])) < datetime.now():
+            return JSONResponse(
+                status_code=401, 
+                content={"detail": "Expired PAT token"}
+            )
+        request.state.user = {"us_id": int(stored_token["us_id"])}
+    else:
+        try:
             # 3. 토큰 디코딩 및 서명 검증
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
             # 4. 검증 성공 시: request.state에 사용자 정보 저장
             # (이후 라우터나 툴에서 request.state.user로 접근 가능)
-            request.state.user = fetch_user_from_mysql(payload["sub"])
-        if request.state.user is None:
+            request.state.user = fetch_user_from_db(payload["sub"])
+        except jwt.ExpiredSignatureError:
             return JSONResponse(
                 status_code=401, 
-                content={"detail": "User not found"}
+                content={"detail": "Token has expired"}
             )
-    except jwt.ExpiredSignatureError:
+        except jwt.InvalidTokenError as e:
+            return JSONResponse(
+                status_code=401, 
+                content={"detail": "Invalid token"}
+            )
+    if request.state.user is None:
         return JSONResponse(
             status_code=401, 
-            content={"detail": "Token has expired"}
-        )
-    except jwt.InvalidTokenError as e:
-        return JSONResponse(
-            status_code=401, 
-            content={"detail": "Invalid token"}
+            content={"detail": "User not found"}
         )
     return None
 
@@ -71,22 +77,3 @@ class AuthenticationMiddleware(Middleware):
             if response:
                 return response
         return await call_next(context)
-    
-
-def create_pat_token(user_id: int) -> dict:
-    """
-    주어진 사용자 ID로 Personal Access Token (PAT) 생성
-    Args:
-        user_id: 토큰을 발급할 사용자 ID
-    Returns:
-        생성된 JWT 토큰 문자열
-    """
-    payload = {
-        "sub": str(user_id),
-        "iat": datetime.datetime.now(datetime.timezone.utc),
-        "exp": datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=PAT_EXPIRATION_DAYS),
-        "jti": str(uuid.uuid4())
-    }
-    token = jwt.encode(payload, PAT_SECRET_KEY, algorithm=ALGORITHM)
-    add_pat_jti(user_id, payload)
-    return {"access_token": token}

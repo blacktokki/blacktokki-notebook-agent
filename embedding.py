@@ -1,38 +1,27 @@
 import asyncio
-from asyncio.log import logger
 import re
 import sys
 import json
 import pandas as pd
-from dotenv import load_dotenv
+
 import chromadb
 from chromadb.utils import embedding_functions
-from sqlalchemy import create_engine
 import markdownify
 from datetime import datetime
 from fastmcp.utilities.logging import get_logger
 
-from env import DB_USER, DB_PASSWORD, MODEL_NAME, TEXT_PREFIX
+from env import MODEL_NAME, TEXT_PREFIX, QUERY_PREFIX
+from notebook_db import fetch_notes_from_db
 
 # ---------------------------------------------------------
 # 1. 설정 (Configuration)
 # ---------------------------------------------------------
-
-# MySQL 연결 문자열 (mysql+pymysql://사용자:비번@호스트:포트/DB명)
-DB_CONNECTION_STR = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@127.0.0.1:3306/db1_notebook"
 
 VECTOR_DB_PATH = "./chroma_db_store"
 COLLECTION_NAME = "note_collection"
 STATE_COLLECTION_NAME = "system_state"
 
 logger = get_logger(__name__)
-
-logger.info("MySQL 데이터베이스 연결 중...")
-try:
-    engine = create_engine(DB_CONNECTION_STR)
-except Exception as e:
-    logger.warning(f"MySQL 연결 오류: {e}")
-    raise e
 
 client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
 state_collection = client.get_or_create_collection(name=STATE_COLLECTION_NAME)
@@ -72,57 +61,8 @@ def update_last_run_time(last_timestamp):
         metadatas={"last_run_at": last_timestamp}
     )
     logger.info(f"[State] 실행 시간 업데이트 완료: {last_timestamp}")
-
-
-def get_pat_jti(user_id):
-    result = state_collection.get(where={"sub": str(user_id)})
-    return result['metadatas']
-
-
-def add_pat_jti(user_id, payload):
-    metadata = dict(payload, **{"iat": payload["iat"].isoformat(), "exp": payload["exp"].isoformat()})
-    state_collection.upsert(
-        ids=[f"jti_{user_id}_{payload['jti']}"],
-        documents=["_"], 
-        metadatas=metadata,
-    )
-
-
-def delete_pat_jti(user_id, jti):
-    state_collection.delete(where={"sub": str(user_id), "jti": jti})
-
-
 # ---------------------------------------------------------
-# 2. Extract: MySQL에서 데이터 가져오기
-# ---------------------------------------------------------
-def fetch_user_from_mysql(username):
-    try:
-        # 실제 테이블 구조에 맞게 쿼리 수정
-        # content 컬럼에는 HTML이 들어있다고 가정
-        query = "SELECT us_id FROM db1_account.user where us_username=%(username)s"
-        
-        df = pd.read_sql(query, engine, params={'username': username})
-        return df.iloc[0].to_dict()
-    except Exception as e:
-        logger.warning(f"MySQL 연결 또는 쿼리 오류: {e}")
-        return None
-
-
-def fetch_notes_from_mysql(last_run_time):
-    try:
-        # 실제 테이블 구조에 맞게 쿼리 수정
-        # content 컬럼에는 HTML이 들어있다고 가정
-        query = "SELECT co_id, us_id, co_title, co_description, co_updated FROM content where co_updated > %(last_run)s and co_type='NOTE'"
-        
-        df = pd.read_sql(query, engine, params={'last_run': last_run_time})
-        logger.info(f"DB에서 {last_run_time} 이후에 수정된 {len(df)}개의 노트를 가져왔습니다.")
-        return df
-    except Exception as e:
-        logger.warning(f"MySQL 연결 또는 쿼리 오류: {e}")
-        return pd.DataFrame()
-
-# ---------------------------------------------------------
-# 3. Transform logic: HTML -> Markdown -> Header Split
+# 2. Transform logic: HTML -> Markdown -> Header Split
 # ---------------------------------------------------------
 chunk_size = 500
 chunk_overlap = 100
@@ -210,12 +150,12 @@ def process_content(original_id, user_id, title, html_content, created_at):
     return processed_data
 
 # ---------------------------------------------------------
-# 4. Main Pipeline
+# 3. Main Pipeline
 # ---------------------------------------------------------
 def run_pipeline():
     # A. 마지막 실행 시간 로드
     last_run = get_last_run_time()
-    df = fetch_notes_from_mysql(last_run)
+    df = fetch_notes_from_db(last_run)
     if df.empty:
         return
 
@@ -281,3 +221,22 @@ async def embedding():
         logger.warning("Embedding task was cancelled via signal!")
         raise  # 에러를 다시 던져줘야 완전히 종료됨
 
+def search(user_id: int, query: str) -> str:
+    try:
+        client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
+        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=MODEL_NAME
+        )
+        collection = client.get_collection(name=COLLECTION_NAME, embedding_function=ef)
+        
+        # 벡터 검색 수행
+        results = collection.query(
+            query_texts=[f"{QUERY_PREFIX}{query}"],
+            where={"user_id": user_id},
+            n_results=5  # 상위 5개 추출
+        )
+
+        return results
+
+    except Exception as e:
+        return {"error": f"검색 중 오류 발생: {str(e)}"}

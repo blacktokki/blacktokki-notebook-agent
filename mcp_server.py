@@ -1,42 +1,19 @@
-import os
 import asyncio
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
-from fastmcp import FastMCP, Context, settings
+from fastmcp import FastMCP, settings
 from fastmcp.utilities.logging import get_logger
 from fastmcp.server.dependencies import get_http_request
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-import chromadb
-from chromadb.utils import embedding_functions
 from py_eureka_client import eureka_client
 
-from env import MODEL_NAME, QUERY_PREFIX
-from embedding import COLLECTION_NAME, VECTOR_DB_PATH, delete_pat_jti, embedding, get_pat_jti
-from mcp_auth import AuthenticationMiddleware, authenticate, create_pat_token
+from embedding import embedding, search
+from mcp_auth import AuthenticationMiddleware, authenticate
+from notebook_client import NotebookClient
 
 load_dotenv()
 logger = get_logger(__name__)
-
-def _search(user_id: int, query: str) -> str:
-    try:
-        client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=MODEL_NAME
-        )
-        collection = client.get_collection(name=COLLECTION_NAME, embedding_function=ef)
-        
-        # 벡터 검색 수행
-        results = collection.query(
-            query_texts=[f"{QUERY_PREFIX}{query}"],
-            where={"user_id": user_id},
-            n_results=5  # 상위 5개 추출
-        )
-
-        return results
-
-    except Exception as e:
-        return {"error": f"검색 중 오류 발생: {str(e)}"}
 
 # MCP 서버 생성
 @asynccontextmanager
@@ -77,7 +54,7 @@ def search_notes_tool(query: str) -> str:
     Returns:
         검색된 노트 내용들을 문자열로 반환
     """
-    results = _search(get_http_request().state.user["us_id"], query)
+    results = search(get_http_request().state.user["us_id"], query)
     if results.get("error"):
         return results["error"]
     if not results['documents'][0]:
@@ -99,7 +76,7 @@ def search_notes(request: Request):
         return response
     query = request.query_params["query"]
     us_id = request.state.user["us_id"]
-    results = _search(us_id, query)
+    results = search(us_id, query)
 
     logger.info(f"--- 질문: {query} ---")
     for i in range(len(results['documents'][0])):
@@ -110,26 +87,114 @@ def search_notes(request: Request):
         logger.info("-" * 20)
     return JSONResponse(results)
 
+@mcp.tool()
+def write_note(title: str, content_html: str) -> str:
+    """
+    1. 노트 쓰기 (제목 수정 금지)
+    - 해당 제목의 노트가 이미 존재하면: 내용을 수정(덮어쓰기)합니다. 제목은 변경되지 않습니다.
+    - 해당 제목의 노트가 없으면: 새 노트를 생성합니다.
+    """
+    client = NotebookClient()
+    try:
+        existing_note = client.get_note_by_title(title)
+        
+        if existing_note:
+            # Update Content Only
+            client.update_note_content(existing_note["id"], existing_note, content_html)
+            return f"Note '{title}' (ID: {existing_note['id']}) content updated."
+        else:
+            # Create New
+            new_id = client.create_note(title, content_html)
+            return f"Note '{title}' (ID: {new_id}) created."
+    except Exception as e:
+        return f"Error writing note: {str(e)}"
 
-@mcp.custom_route("/access-token", methods=["GET", "POST"])
-def access_token(request: Request):
-    response = authenticate(request)
-    if response:
-        return response
-    us_id = request.state.user["us_id"]
+@mcp.tool()
+def search_notes(keyword: str = None) -> str:
+    """
+    2. 다건 노트 조회
+    키워드 검색을 지원하며 본문 미리보기를 제공합니다.
+    """
+    client = NotebookClient()
+    notes = client.fetch_contents(["NOTE"])
+    results = []
+    
+    for note in notes:
+        title = note.get("title", "")
+        if keyword and keyword.lower() not in title.lower():
+            continue
+            
+        desc = note.get("description", "")
+        preview = client._clean_html_tags(desc)[:100].replace("\n", " ")
+        results.append(f"ID: {note['id']} | Title: {title} | Preview: {preview}...")
+        
+    return "\n".join(results) if results else "No notes found."
 
-    if request.method == "GET":
-        result = get_pat_jti(us_id)
-    else:
-        result = create_pat_token(us_id)
-    return JSONResponse(result)
+@mcp.tool()
+def get_archives(note_title: str) -> str:
+    """
+    3. 아카이브 조회 (SNAPSHOT, DELTA)
+    """
+    client = NotebookClient()
+    parent_note = client.get_note_by_title(note_title)
+    if not parent_note:
+        return f"Error: Note '{note_title}' not found."
+    
+    archives = client.fetch_contents(["SNAPSHOT", "DELTA"], parent_id=parent_note["id"])
+    results = []
+    for arc in archives:
+        updated = arc.get("updated", "Unknown")
+        type_ = arc.get("type")
+        results.append(f"[{updated}] {type_} (ID: {arc['id']})")
+        
+    return "\n".join(results) if results else "No archives found."
 
+@mcp.tool()
+def get_kanban_boards() -> str:
+    """
+    4. 칸반 보드 조회
+    """
+    client = NotebookClient()
+    boards = client.fetch_contents(["BOARD"])
+    results = []
+    for board in boards:
+        option = board.get("option", {})
+        note_ids = option.get("BOARD_NOTE_IDS", [])
+        header_level = option.get("BOARD_HEADER_LEVEL", "Unknown")
+        results.append(f"ID: {board['id']} | Title: {board['title']} | Columns: {note_ids} (H{header_level})")
+    return "\n".join(results) if results else "No boards found."
 
-@mcp.custom_route("/access-token/{jti}", methods=["DELETE"])
-def access_token(request: Request):
-    response = authenticate(request)
-    if response:
-        return response
-    us_id = request.state.user["us_id"]
-    delete_pat_jti(us_id, request.path_params["jti"])
-    return JSONResponse({})
+@mcp.tool()
+def move_kanban_card(source_note_title: str, target_note_title: str, card_header_text: str) -> str:
+    """
+    5. 칸반 카드 이동
+    """
+    client = NotebookClient()
+    try:
+        return client.move_kanban_card_logic(source_note_title, target_note_title, card_header_text)
+    except Exception as e:
+        return f"Error moving card: {str(e)}"
+
+@mcp.tool()
+def move_note(old_title: str, new_title: str) -> str:
+    """
+    6. 노트 이동 (이름 변경)
+    노트의 제목을 변경합니다. (예: 'Folder/OldName' -> 'Folder/NewName')
+    경로(폴더)를 변경하는 것과 동일한 효과를 가집니다.
+    """
+    client = NotebookClient()
+    try:
+        # 1. 대상 노트 확인 (덮어쓰기 방지)
+        if client.get_note_by_title(new_title):
+            return f"Error: A note with the title '{new_title}' already exists."
+
+        # 2. 원본 노트 확인
+        note = client.get_note_by_title(old_title)
+        if not note:
+            return f"Error: Note '{old_title}' not found."
+
+        # 3. 이름 변경 요청
+        client.rename_note(note["id"], note, new_title)
+        return f"Successfully moved/renamed note from '{old_title}' to '{new_title}'."
+    except Exception as e:
+        return f"Error moving note: {str(e)}"
