@@ -72,6 +72,7 @@ class NotebookClient:
         snapshot_payload = note_data.copy()
         snapshot_payload["type"] = "SNAPSHOT"
         snapshot_payload["parentId"] = parent_id
+        snapshot_payload["option"]["USE_AGENT"] = True
         
         # id는 새로 생성되어야 하므로 제거 (또는 None 설정)
         if "id" in snapshot_payload:
