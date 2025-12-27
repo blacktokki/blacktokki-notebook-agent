@@ -130,17 +130,19 @@ def process_content(original_id, user_id, title, html_content, created_at):
 
         # 헤더 경로 문자열 생성
         header_path = "\n".join([f"{'#' * int(k[1])} {v}" for k, v in header_metadata.items()]) if header_metadata else ""
-        text = f"# {title}\n{header_path}\n{chunk_text}"  # 임베딩될 텍스트
+        prefix = f"# {title}\n{header_path}\n"
+        text = f"{TEXT_PREFIX}{prefix}{chunk_text}"  # 임베딩될 텍스트
         logger.debug("================================")
         logger.debug(text)
 
         processed_data.append({
             "id": f"{original_id}_{idx}", # 유니크 ID 생성
-            "text": f"{TEXT_PREFIX}{text}",
+            "text": text,
             "metadata": {
                 "original_id": original_id,
                 "user_id": user_id,
                 "title": title,
+                "prefix": f"{TEXT_PREFIX}{prefix}",
                 "created_at": str(created_at),
                 "links": json.dumps(links_meta_list, ensure_ascii=False),
                 **header_metadata # 헤더 정보도 메타데이터로 저장

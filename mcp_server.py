@@ -77,15 +77,29 @@ def search_notes(request: Request):
     query = request.query_params["query"]
     us_id = request.state.user["us_id"]
     results = search(us_id, query)
+    formatted_results = [
+    {
+        "id": id,
+        "distance": dist,
+        "metadata": meta,
+        "document": doc
+    }
+    for id, dist, meta, doc in zip(
+        results['ids'][0], 
+        results['distances'][0], 
+        results['metadatas'][0], 
+        results['documents'][0]
+    )
+]
 
     logger.info(f"--- 질문: {query} ---")
-    for i in range(len(results['documents'][0])):
+    for i, item in enumerate(formatted_results):
         logger.info(f"순위 {i+1}:")
-        logger.info(f"메타데이터: {results['metadatas'][0][i]}")
-        logger.info(f"거리(유사도 역수): {results['distances'][0][i]}")
-        logger.info(f"내용: \n{results['documents'][0][i]}\n")
+        logger.info(f"메타데이터: {item['metadata']}")
+        logger.info(f"거리(유사도 역수): {item['distance']}")
+        logger.info(f"내용: \n{item['document']}\n")
         logger.info("-" * 20)
-    return JSONResponse(results)
+    return JSONResponse(formatted_results)
 
 @mcp.tool()
 def write_note(title: str, content_html: str) -> str:
