@@ -46,15 +46,16 @@ async def server_lifespan(server:FastMCP):
 mcp = FastMCP("MyNoteSearcher", middleware=[AuthenticationMiddleware()], lifespan=server_lifespan)
 
 @mcp.tool()
-def search_notes_tool(query: str) -> str:
+def search_notes_tool(query: str, page:int = 0) -> str:
     """
     사용자의 질문과 관련된 노트를 데이터베이스에서 검색합니다.
     Args:
         query: 검색할 질문이나 키워드 (예: "파이썬 프로젝트 아이디어")
+        page(Optional): 0부터 시작하는 검색 결과 페이지 번호 (default: 0)
     Returns:
         검색된 노트 내용들을 문자열로 반환
     """
-    results = search(get_http_request().state.user["us_id"], query)
+    results = search(get_http_request().state.user["us_id"], query, 20, page)
     if results.get("error"):
         return results["error"]
     if not results['documents'][0]:
@@ -75,17 +76,35 @@ def search_notes(request: Request):
     if response:
         return response
     query = request.query_params["query"]
+    page = int(request.query_params["page"])
+    size = int(request.query_params["size"])
     us_id = request.state.user["us_id"]
-    results = search(us_id, query)
+    results = search(us_id, query, size, page)
+    if results.get("error"):
+        raise Exception(results["error"])
+    formatted_results = [
+    {
+        "id": id,
+        "distance": dist,
+        "metadata": meta,
+        "document": doc
+    }
+    for id, dist, meta, doc in zip(
+        results['ids'][0], 
+        results['distances'][0], 
+        results['metadatas'][0], 
+        results['documents'][0]
+    )
+]
 
     logger.info(f"--- 질문: {query} ---")
-    for i in range(len(results['documents'][0])):
+    for i, item in enumerate(formatted_results):
         logger.info(f"순위 {i+1}:")
-        logger.info(f"메타데이터: {results['metadatas'][0][i]}")
-        logger.info(f"거리(유사도 역수): {results['distances'][0][i]}")
-        logger.info(f"내용: \n{results['documents'][0][i]}\n")
+        logger.info(f"메타데이터: {item['metadata']}")
+        logger.info(f"거리(유사도 역수): {item['distance']}")
+        logger.info(f"내용: \n{item['document']}\n")
         logger.info("-" * 20)
-    return JSONResponse(results)
+    return JSONResponse(formatted_results)
 
 @mcp.tool()
 def write_note(title: str, content_html: str) -> str:

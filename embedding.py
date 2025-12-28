@@ -130,17 +130,19 @@ def process_content(original_id, user_id, title, html_content, created_at):
 
         # 헤더 경로 문자열 생성
         header_path = "\n".join([f"{'#' * int(k[1])} {v}" for k, v in header_metadata.items()]) if header_metadata else ""
-        text = f"# {title}\n{header_path}\n{chunk_text}"  # 임베딩될 텍스트
+        prefix = f"# {title}\n{header_path}\n"
+        text = f"{TEXT_PREFIX}{prefix}{chunk_text}"  # 임베딩될 텍스트
         logger.debug("================================")
         logger.debug(text)
 
         processed_data.append({
             "id": f"{original_id}_{idx}", # 유니크 ID 생성
-            "text": f"{TEXT_PREFIX}{text}",
+            "text": text,
             "metadata": {
                 "original_id": original_id,
                 "user_id": user_id,
                 "title": title,
+                "prefix": f"{TEXT_PREFIX}{prefix}",
                 "created_at": str(created_at),
                 "links": json.dumps(links_meta_list, ensure_ascii=False),
                 **header_metadata # 헤더 정보도 메타데이터로 저장
@@ -221,7 +223,7 @@ async def embedding():
         logger.warning("Embedding task was cancelled via signal!")
         raise  # 에러를 다시 던져줘야 완전히 종료됨
 
-def search(user_id: int, query: str) -> str:
+def search(user_id: int, query: str, size: int, page: int) -> str:
     try:
         client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
         ef = embedding_functions.SentenceTransformerEmbeddingFunction(
@@ -233,10 +235,21 @@ def search(user_id: int, query: str) -> str:
         results = collection.query(
             query_texts=[f"{QUERY_PREFIX}{query}"],
             where={"user_id": user_id},
-            n_results=5  # 상위 5개 추출
+            n_results=size * (page + 1),
         )
+        offset = size * page
+        paginated_output = {
+            "ids": [],
+            "distances": [] if results.get("distances") else None,
+            "metadatas": [] if results.get("metadatas") else None,
+            "documents": [] if results.get("documents") else None
+        }
 
-        return results
+        for i in range(len(results["ids"])):
+            for key in ["ids", "distances", "metadatas", "documents"]:
+                if paginated_output[key] is not None:
+                    paginated_output[key].append(results[key][i][offset:])
+        return paginated_output
 
     except Exception as e:
         return {"error": f"검색 중 오류 발생: {str(e)}"}
