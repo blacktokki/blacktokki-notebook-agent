@@ -1,4 +1,6 @@
 import asyncio
+import json
+from typing import Dict, Any
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from fastmcp import FastMCP, settings
@@ -46,29 +48,35 @@ async def server_lifespan(server:FastMCP):
 mcp = FastMCP("MyNoteSearcher", middleware=[AuthenticationMiddleware()], lifespan=server_lifespan)
 
 @mcp.tool()
-def search_notes_tool(query: str, page:int = 0) -> str:
+def search_notes_tool(query: str, page: int = 0) -> str:
     """
     사용자의 질문과 관련된 노트를 데이터베이스에서 검색합니다.
     Args:
         query: 검색할 질문이나 키워드 (예: "파이썬 프로젝트 아이디어")
         page(Optional): 0부터 시작하는 검색 결과 페이지 번호 (default: 0)
-    Returns:
-        검색된 노트 내용들을 문자열로 반환
     """
     results = search(get_http_request().state.user["us_id"], query, 20, page)
+    
     if results.get("error"):
-        return results["error"]
-    if not results['documents'][0]:
-        return "관련된 내용을 찾을 수 없습니다."
-    response = f"검색 결과 ('{query}'):\n\n"
+        return json.dumps({"error": results["error"]}, ensure_ascii=False)
+    
+    if not results.get('documents') or not results['documents'][0]:
+        return json.dumps({"query": query, "results": [], "message": "관련된 내용을 찾을 수 없습니다."}, ensure_ascii=False)
+
+    search_results = []
     for i, doc in enumerate(results['documents'][0]):
         meta = results['metadatas'][0][i]
-        response += f"[{i+1}] {meta['title']} (원본ID: {meta['original_id']})\n"
-        response += f"내용: {doc}\n"
-        response += "-" * 30 + "\n"
+        search_results.append({
+            "index": i + 1,
+            "title": meta['title'],
+            "original_id": meta['original_id'],
+            "content": doc
+        })
         
-    return response
-    
+    return json.dumps({
+        "query": query,
+        "results": search_results
+    }, ensure_ascii=False)
 
 @mcp.custom_route("/search", methods=["GET"])
 def search_notes(request: Request):
@@ -118,15 +126,23 @@ def write_note(title: str, content_html: str) -> str:
         existing_note = client.get_note_by_title(title)
         
         if existing_note:
-            # Update Content Only
             client.update_note_content(existing_note["id"], existing_note, content_html)
-            return f"Note '{title}' (ID: {existing_note['id']}) content updated."
+            return json.dumps({
+                "status": "success",
+                "action": "update",
+                "title": title,
+                "id": existing_note['id']
+            }, ensure_ascii=False)
         else:
-            # Create New
             new_id = client.create_note(title, content_html)
-            return f"Note '{title}' (ID: {new_id}) created."
+            return json.dumps({
+                "status": "success",
+                "action": "create",
+                "title": title,
+                "id": new_id
+            }, ensure_ascii=False)
     except Exception as e:
-        return f"Error writing note: {str(e)}"
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
 def search_notes(keyword: str = None) -> str:
@@ -144,10 +160,13 @@ def search_notes(keyword: str = None) -> str:
             continue
             
         desc = note.get("description", "")
-        preview = client._clean_html_tags(desc)[:100].replace("\n", " ")
-        results.append(f"ID: {note['id']} | Title: {title} | Preview: {preview}...")
-        
-    return "\n".join(results) if results else "No notes found."
+        preview = client._clean_html_tags(desc)
+        results.append({
+            "id": note['id'],
+            "title": str(title),
+            "preview": preview
+        })
+    return json.dumps({"count": len(results), "notes": results}, ensure_ascii=False)
 
 @mcp.tool()
 def get_archives(note_title: str) -> str:
@@ -157,16 +176,22 @@ def get_archives(note_title: str) -> str:
     client = NotebookClient()
     parent_note = client.get_note_by_title(note_title)
     if not parent_note:
-        return f"Error: Note '{note_title}' not found."
+        return json.dumps({"error": f"Note '{note_title}' not found."}, ensure_ascii=False)
     
     archives = client.fetch_contents(["SNAPSHOT", "DELTA"], parent_id=parent_note["id"])
     results = []
     for arc in archives:
-        updated = arc.get("updated", "Unknown")
-        type_ = arc.get("type")
-        results.append(f"[{updated}] {type_} (ID: {arc['id']})")
+        results.append({
+            "updated": arc.get("updated", "Unknown"),
+            "type": arc.get("type"),
+            "id": arc['id']
+        })
         
-    return "\n".join(results) if results else "No archives found."
+    return json.dumps({
+        "note_title": note_title,
+        "parent_id": parent_note["id"],
+        "archives": results
+    }, ensure_ascii=False)
 
 @mcp.tool()
 def get_kanban_boards() -> str:
@@ -178,10 +203,17 @@ def get_kanban_boards() -> str:
     results = []
     for board in boards:
         option = board.get("option", {})
-        note_ids = option.get("BOARD_NOTE_IDS", [])
-        header_level = option.get("BOARD_HEADER_LEVEL", "Unknown")
-        results.append(f"ID: {board['id']} | Title: {board['title']} | Columns: {note_ids} (H{header_level})")
-    return "\n".join(results) if results else "No boards found."
+        results.append({
+            "id": board['id'],
+            "title": board['title'],
+            "columns": option.get("BOARD_NOTE_IDS", []),
+            "header_level": option.get("BOARD_HEADER_LEVEL")
+        })
+    
+    return json.dumps({
+        "count": len(results),
+        "boards": results
+    }, ensure_ascii=False)
 
 @mcp.tool()
 def move_kanban_card(source_note_title: str, target_note_title: str, card_header_text: str) -> str:
@@ -190,30 +222,41 @@ def move_kanban_card(source_note_title: str, target_note_title: str, card_header
     """
     client = NotebookClient()
     try:
-        return client.move_kanban_card_logic(source_note_title, target_note_title, card_header_text)
+        result = client.move_kanban_card_logic(source_note_title, target_note_title, card_header_text)
+        return json.dumps({
+            "status": "success",
+            "message": result
+        }, ensure_ascii=False)
     except Exception as e:
-        return f"Error moving card: {str(e)}"
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
 def move_note(old_title: str, new_title: str) -> str:
     """
     6. 노트 이동 (이름 변경)
     노트의 제목을 변경합니다. (예: 'Folder/OldName' -> 'Folder/NewName')
-    경로(폴더)를 변경하는 것과 동일한 효과를 가집니다.
     """
     client = NotebookClient()
     try:
-        # 1. 대상 노트 확인 (덮어쓰기 방지)
         if client.get_note_by_title(new_title):
-            return f"Error: A note with the title '{new_title}' already exists."
+            return json.dumps({
+                "status": "error", 
+                "message": f"A note with the title '{new_title}' already exists."
+            }, ensure_ascii=False)
 
-        # 2. 원본 노트 확인
         note = client.get_note_by_title(old_title)
         if not note:
-            return f"Error: Note '{old_title}' not found."
+            return json.dumps({
+                "status": "error", 
+                "message": f"Note '{old_title}' not found."
+            }, ensure_ascii=False)
 
-        # 3. 이름 변경 요청
         client.rename_note(note["id"], note, new_title)
-        return f"Successfully moved/renamed note from '{old_title}' to '{new_title}'."
+        return json.dumps({
+            "status": "success",
+            "old_title": old_title,
+            "new_title": new_title,
+            "note_id": note["id"]
+        }, ensure_ascii=False)
     except Exception as e:
-        return f"Error moving note: {str(e)}"
+        return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)

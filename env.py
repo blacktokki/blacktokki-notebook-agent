@@ -12,4 +12,4 @@ TEXT_PREFIX =  os.getenv("TEXT_PREFIX", "passage: ")
 QUERY_PREFIX =  os.getenv("QUERY_PREFIX", "query: ")
 ROOT_PATH = os.getenv("ROOT_PATH", "/agent")
 
-NOTEBOOK_API_URL = os.getenv("NOTEBOOK_API_URL", "https://blacktokki.kro.kr/notebook")
+NOTEBOOK_API_URL = os.getenv("NOTEBOOK_API_URL")

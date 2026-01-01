@@ -1,4 +1,3 @@
-import os
 import re
 import requests
 from typing import List, Optional, Dict, Any, Tuple
@@ -13,7 +12,7 @@ class NotebookClient:
 
     def _get_headers(self, auth) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
-        if self.auth:
+        if auth:
             headers["Authorization"] = auth
         return headers
 
@@ -34,12 +33,9 @@ class NotebookClient:
         if parent_id is not None:
             params["parentId"] = parent_id
 
-        try:
-            response = requests.get(f"{self.base_url}/api/v1/content", params=params, headers=self.headers, timeout=10)
-            response.raise_for_status()
-            return response.json().get("value", [])
-        except requests.RequestException:
-            return []
+        response = requests.get(f"{self.base_url}/api/v1/content", params=params, headers=self.headers, timeout=10)
+        response.raise_for_status()
+        return response.json().get("value", [])
 
     def get_note_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         notes = self.fetch_contents(["NOTE"])
@@ -72,7 +68,6 @@ class NotebookClient:
         snapshot_payload = note_data.copy()
         snapshot_payload["type"] = "SNAPSHOT"
         snapshot_payload["parentId"] = parent_id
-        snapshot_payload["option"]["USE_AGENT"] = True
         
         # id는 새로 생성되어야 하므로 제거 (또는 None 설정)
         if "id" in snapshot_payload:

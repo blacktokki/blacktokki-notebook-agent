@@ -1,6 +1,5 @@
 import hashlib
 import jwt
-import uuid
 from datetime import datetime
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -21,17 +20,12 @@ def authenticate(request:Request):
             content={"detail": "Missing Authorization header"}
         )
     # 2. 토큰 추출
-    prefix, token = auth_header.split(" ")
-    if prefix not in ["JWT", "Bearer", "PAT"]:
-        return JSONResponse(
-            status_code=401, 
-            content={"detail": "Invalid Authorization header"}
-        )
-    if prefix == "PAT":
+    _, token = auth_header.split(" ")
+    if token.startswith("pat_"):
         # PAT 토큰 검증
         hashed_object = hashlib.sha256(token.encode('utf-8'))
         calculated_hash = hashed_object.hexdigest()
-        stored_token = fetch_token_from_db(calculated_hash)            
+        stored_token = fetch_token_from_db(calculated_hash)
         if stored_token is None:
             return JSONResponse(
                 status_code=401, 
@@ -75,5 +69,6 @@ class AuthenticationMiddleware(Middleware):
         if request:
             response = authenticate(request)
             if response:
-                return response
+                raise Exception(response.body)
+                # return response
         return await call_next(context)
