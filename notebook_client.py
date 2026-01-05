@@ -22,13 +22,13 @@ class NotebookClient:
         clean = re.compile('<.*?>')
         return re.sub(clean, '', html_text)
 
-    def fetch_contents(self, types: List[str], parent_id: Optional[int] = None, page: int = 0) -> List[Dict[str, Any]]:
+    def fetch_contents(self, types: List[str], with_hidden: bool, parent_id: Optional[int] = None, page: int = 0) -> List[Dict[str, Any]]:
         params = {
-            "self": "true",
             "sort": "id,DESC",
             "types": ",".join(types),
             "size": 256,
-            "page": page
+            "page": page,
+            "withHidden": with_hidden
         }
         if parent_id is not None:
             params["parentId"] = parent_id
@@ -38,7 +38,7 @@ class NotebookClient:
         return response.json().get("value", [])
 
     def get_note_by_title(self, title: str) -> Optional[Dict[str, Any]]:
-        notes = self.fetch_contents(["NOTE"])
+        notes = self.fetch_contents(["NOTE"], True)
         for note in notes:
             if note.get("title") == title:
                 return note

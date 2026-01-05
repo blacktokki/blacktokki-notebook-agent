@@ -223,18 +223,19 @@ async def embedding():
         logger.warning("Embedding task was cancelled via signal!")
         raise  # 에러를 다시 던져줘야 완전히 종료됨
 
-def search(user_id: int, query: str, size: int, page: int) -> str:
+def search(user_id: int, query: str, size: int, page: int, withHidden: bool) -> str:
     try:
         client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
         ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name=MODEL_NAME
         )
         collection = client.get_collection(name=COLLECTION_NAME, embedding_function=ef)
-        
+        where = {"user_id": user_id}
+
         # 벡터 검색 수행
         results = collection.query(
             query_texts=[f"{QUERY_PREFIX}{query}"],
-            where={"user_id": user_id},
+            where=where,
             n_results=size * (page + 1),
         )
         offset = size * page
@@ -246,9 +247,17 @@ def search(user_id: int, query: str, size: int, page: int) -> str:
         }
 
         for i in range(len(results["ids"])):
+            filtered_indices = []
+            for idx, meta in enumerate(results["metadatas"][i]):
+                title = meta.get("title", "")
+                if withHidden or not (title.startswith('.') or '/.' in title):
+                    filtered_indices.append(idx)
+            target_indices = filtered_indices[offset : offset + size]
+
             for key in ["ids", "distances", "metadatas", "documents"]:
                 if paginated_output[key] is not None:
-                    paginated_output[key].append(results[key][i][offset:])
+                    page_data = [results[key][i][idx] for idx in target_indices]
+                    paginated_output[key].append(page_data)
         return paginated_output
 
     except Exception as e:

@@ -47,15 +47,19 @@ async def server_lifespan(server:FastMCP):
 
 mcp = FastMCP("MyNoteSearcher", middleware=[AuthenticationMiddleware()], lifespan=server_lifespan)
 
+def _search_notes(query: str, size: int, page: int, with_hidden: bool):
+    return search(get_http_request().state.user["us_id"], query, size, page, with_hidden)
+
 @mcp.tool()
-def search_notes_tool(query: str, page: int = 0) -> str:
+def search_notes_tool(query: str, page: int = 0, withHidden: bool = False) -> str:
     """
     사용자의 질문과 관련된 노트를 데이터베이스에서 검색합니다.
     Args:
         query: 검색할 질문이나 키워드 (예: "파이썬 프로젝트 아이디어")
         page(Optional): 0부터 시작하는 검색 결과 페이지 번호 (default: 0)
+        withHidden(Optional, Boolean): 숨김 노트 포함 여부 (default: false)
     """
-    results = search(get_http_request().state.user["us_id"], query, 20, page)
+    results = _search_notes(query, 20, page, withHidden)
     
     if results.get("error"):
         return json.dumps({"error": results["error"]}, ensure_ascii=False)
@@ -86,8 +90,8 @@ def search_notes(request: Request):
     query = request.query_params["query"]
     page = int(request.query_params["page"])
     size = int(request.query_params["size"])
-    us_id = request.state.user["us_id"]
-    results = search(us_id, query, size, page)
+    with_hidden = request.query_params["withHidden"] == "true"
+    results = _search_notes(query, size, page, with_hidden)
     if results.get("error"):
         raise Exception(results["error"])
     formatted_results = [
@@ -145,13 +149,13 @@ def write_note(title: str, content_html: str) -> str:
         return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
 
 @mcp.tool()
-def search_notes(keyword: str = None) -> str:
+def search_notes(keyword: str = None, withHidden: bool = False) -> str:
     """
     2. 다건 노트 조회
     키워드 검색을 지원하며 본문 미리보기를 제공합니다.
     """
     client = NotebookClient()
-    notes = client.fetch_contents(["NOTE"])
+    notes = client.fetch_contents(["NOTE"], withHidden)
     results = []
     
     for note in notes:
@@ -178,7 +182,7 @@ def get_archives(note_title: str) -> str:
     if not parent_note:
         return json.dumps({"error": f"Note '{note_title}' not found."}, ensure_ascii=False)
     
-    archives = client.fetch_contents(["SNAPSHOT", "DELTA"], parent_id=parent_note["id"])
+    archives = client.fetch_contents(["SNAPSHOT", "DELTA"], True, parent_id=parent_note["id"])
     results = []
     for arc in archives:
         results.append({
@@ -194,12 +198,12 @@ def get_archives(note_title: str) -> str:
     }, ensure_ascii=False)
 
 @mcp.tool()
-def get_kanban_boards() -> str:
+def get_kanban_boards(withHidden: bool = False) -> str:
     """
     4. 칸반 보드 조회
     """
     client = NotebookClient()
-    boards = client.fetch_contents(["BOARD"])
+    boards = client.fetch_contents(["BOARD"], withHidden)
     results = []
     for board in boards:
         option = board.get("option", {})
