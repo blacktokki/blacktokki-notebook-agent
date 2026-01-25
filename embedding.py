@@ -2,6 +2,7 @@ import asyncio
 import re
 import sys
 import json
+import base64
 import pandas as pd
 
 import chromadb
@@ -12,6 +13,7 @@ from fastmcp.utilities.logging import get_logger
 
 from env import MODEL_NAME, TEXT_PREFIX, QUERY_PREFIX
 from notebook_db import fetch_notes_from_db
+from link import get_link_preview
 
 # ---------------------------------------------------------
 # 1. 설정 (Configuration)
@@ -68,16 +70,28 @@ chunk_size = 500
 chunk_overlap = 100
 unlink_regex_pattern = r'\[(.*?)\]\((.*?)\)'
 
-def process_content(original_id, user_id, title, html_content, created_at):
+def process_content(original_id, user_id, title, html_content, created_at, external_link=None):
     """
     HTML 내용을 마크다운으로 변환하고 헤더 기반으로 청킹하여 Document 리스트를 반환합니다.
-    """
-    
+    """    
     # [Step A] HTML -> Markdown 변환
     # heading_style="atx"는 # 기호를 사용하도록 강제합니다 (필수)
     # 링크 제거 정규식도 적용
-    md_content = markdownify.markdownify(html_content or "", heading_style="atx")
-    # md_content = re.sub(unlink_regex_pattern, r'[\1]()', md_content_pre)
+    md_content_pre = markdownify.markdownify(html_content or "", heading_style="atx")
+    found_links = re.findall(unlink_regex_pattern, md_content_pre)
+    
+    # 메타데이터용 리스트 생성
+    links_meta_dict1 = {link_url: base64.b64encode(str(i).encode()).decode() for i, (_, link_url) in enumerate(found_links)}
+    links_meta_dict2 = {base64.b64encode(str(i).encode()).decode(): link_url for i, (_, link_url) in enumerate(found_links)}
+
+    def replacer(match):
+        link_name = match.group(1)  # 첫 번째 그룹: 링크 이름
+        url = match.group(2)      # 두 번째 그룹: URL (여기서는 사용 안 함)
+        return f"[{link_name}]({links_meta_dict1[url]})"
+
+    # 3. 임베딩용 텍스트 정제 (기존 요구사항: URL 제거하고 텍스트만 남기거나 []()형태로)
+    # 여기서는 [텍스트]() 형태로 변경합니다.
+    md_content = re.sub(unlink_regex_pattern, replacer, md_content_pre)
 
     # [Step B] 1차 청킹: 헤더(Header) 기준 분리
     # 문서를 논리적 섹션(챕터)으로 나눕니다.
@@ -116,27 +130,31 @@ def process_content(original_id, user_id, title, html_content, created_at):
         raw_chunk_text = split.page_content
         if (len(raw_chunk_text) < 2):
             continue  # 너무 짧은 청크는 무시
-        # 현재 청크 내의 모든 링크 추출 (텍스트, URL)
-        found_links = re.findall(unlink_regex_pattern, raw_chunk_text)
-        
-        # 메타데이터용 리스트 생성 (JSON 저장을 위해 dict 리스트로)
-        # 예: [{"text": "구글", "url": "https://google.com"}, ...]
-        links_meta_list = [{"text": link_text, "url": link_url} for link_text, link_url in found_links]
-        
-        # 3. 임베딩용 텍스트 정제 (기존 요구사항: URL 제거하고 텍스트만 남기거나 []()형태로)
-        # 여기서는 [텍스트]() 형태로 변경합니다.
-        chunk_text = re.sub(unlink_regex_pattern, r'[\1]()', raw_chunk_text)
+        if external_link:
+            links_meta_list = [external_link]
+            chunk_text = raw_chunk_text
+        else:
+            # 현재 청크 내의 모든 링크 추출 (텍스트, URL)
+            found_links = re.findall(unlink_regex_pattern, raw_chunk_text)
+            
+            # 메타데이터용 리스트 생성 (JSON 저장을 위해 dict 리스트로)
+            # 예: [{"text": "구글", "url": "https://google.com"}, ...]
+            links_meta_list = [{"origin": title, "text": link_text, "url": links_meta_dict2[link_index]} for link_text, link_index in found_links]
+            
+            # 3. 임베딩용 텍스트 정제 (기존 요구사항: URL 제거하고 텍스트만 남기거나 []()형태로)
+            # 여기서는 [텍스트]() 형태로 변경합니다.
+            chunk_text = re.sub(unlink_regex_pattern, r'[\1]()', raw_chunk_text)
 
 
         # 헤더 경로 문자열 생성
+        _id = f"{original_id}_{idx}"
         header_path = "\n".join([f"{'#' * int(k[1])} {v}" for k, v in header_metadata.items()]) if header_metadata else ""
         prefix = f"# {title}\n{header_path}\n"
         text = f"{TEXT_PREFIX}{prefix}{chunk_text}"  # 임베딩될 텍스트
         logger.debug("================================")
         logger.debug(text)
-
         processed_data.append({
-            "id": f"{original_id}_{idx}", # 유니크 ID 생성
+            "id": _id, # 유니크 ID 생성
             "text": text,
             "metadata": {
                 "original_id": original_id,
@@ -144,11 +162,20 @@ def process_content(original_id, user_id, title, html_content, created_at):
                 "title": title,
                 "prefix": f"{TEXT_PREFIX}{prefix}",
                 "created_at": str(created_at),
+                "with_external": external_link is not None,
                 "links": json.dumps(links_meta_list, ensure_ascii=False),
                 **header_metadata # 헤더 정보도 메타데이터로 저장
             }
         })
-        
+
+        # 첨부 링크 청크 생성
+        if external_link is not None:
+            continue
+        for idx2, link in enumerate(links_meta_list):
+            if idx2 == 0:
+                logger.info(f"{title}[{idx}](links: {len(links_meta_list)}")
+            preview = get_link_preview(link["url"])
+            processed_data += process_content(f"{_id}_{idx2}", user_id, preview.get("title"), preview.get("description"), created_at, link)
     return processed_data
 
 # ---------------------------------------------------------
@@ -223,19 +250,28 @@ async def embedding():
         logger.warning("Embedding task was cancelled via signal!")
         raise  # 에러를 다시 던져줘야 완전히 종료됨
 
-def search(user_id: int, query: str, size: int, page: int, withHidden: bool) -> str:
+def search(user_id: int, query: str, exact: bool, size: int, page: int, withHidden: bool, withExternal: bool) -> str:
     try:
         client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
         ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name=MODEL_NAME
         )
         collection = client.get_collection(name=COLLECTION_NAME, embedding_function=ef)
+        
         where = {"user_id": user_id}
+        if not withExternal:
+            where = {
+                "$and": [
+                    where,
+                    {"with_external" : False}
+                ]
+            }
 
         # 벡터 검색 수행
         results = collection.query(
             query_texts=[f"{QUERY_PREFIX}{query}"],
             where=where,
+            where_document={"$contains": query} if exact else None,
             n_results=size * (page + 1),
         )
         offset = size * page

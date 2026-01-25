@@ -47,8 +47,8 @@ async def server_lifespan(server:FastMCP):
 
 mcp = FastMCP("MyNoteSearcher", middleware=[AuthenticationMiddleware()], lifespan=server_lifespan)
 
-def _search_notes(query: str, size: int, page: int, with_hidden: bool):
-    return search(get_http_request().state.user["us_id"], query, size, page, with_hidden)
+def _search_notes(query: str, exact: bool, size: int, page: int, with_hidden: bool, with_external: bool):
+    return search(get_http_request().state.user["us_id"], query, exact, size, page, with_hidden, with_external)
 
 @mcp.tool()
 def search_notes_tool(query: str, page: int = 0, withHidden: bool = False) -> str:
@@ -59,7 +59,7 @@ def search_notes_tool(query: str, page: int = 0, withHidden: bool = False) -> st
         page(Optional): 0부터 시작하는 검색 결과 페이지 번호 (default: 0)
         withHidden(Optional, Boolean): 숨김 노트 포함 여부 (default: false)
     """
-    results = _search_notes(query, 20, page, withHidden)
+    results = _search_notes(query, False, 20, page, withHidden, True)
     
     if results.get("error"):
         return json.dumps({"error": results["error"]}, ensure_ascii=False)
@@ -90,8 +90,10 @@ def search_notes(request: Request):
     query = request.query_params["query"]
     page = int(request.query_params["page"])
     size = int(request.query_params["size"])
-    with_hidden = request.query_params["withHidden"] == "true"
-    results = _search_notes(query, size, page, with_hidden)
+    exact = request.query_params.get("exact") == "true"
+    with_hidden = request.query_params.get("withHidden") == "true"
+    with_external = request.query_params.get("withExternal") == "true"
+    results = _search_notes(query, exact, size, page, with_hidden, with_external)
     if results.get("error"):
         raise Exception(results["error"])
     formatted_results = [
