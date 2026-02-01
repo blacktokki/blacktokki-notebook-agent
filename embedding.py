@@ -8,6 +8,7 @@ import pandas as pd
 import chromadb
 from chromadb.utils import embedding_functions
 import markdownify
+import markdown
 from datetime import datetime
 from fastmcp.utilities.logging import get_logger
 
@@ -70,6 +71,12 @@ chunk_size = 500
 chunk_overlap = 100
 unlink_regex_pattern = r'\[(.*?)\]\((.*?)\)'
 
+def to_markdown(html: str):
+    return markdownify.markdownify(html or "", heading_style="atx")
+
+def to_html(md: str):
+    return markdown.markdown(md)
+
 def process_content(original_id, user_id, title, html_content, created_at, external_link=None):
     """
     HTML 내용을 마크다운으로 변환하고 헤더 기반으로 청킹하여 Document 리스트를 반환합니다.
@@ -77,7 +84,7 @@ def process_content(original_id, user_id, title, html_content, created_at, exter
     # [Step A] HTML -> Markdown 변환
     # heading_style="atx"는 # 기호를 사용하도록 강제합니다 (필수)
     # 링크 제거 정규식도 적용
-    md_content_pre = markdownify.markdownify(html_content or "", heading_style="atx")
+    md_content_pre = to_markdown(html_content or "")
     found_links = re.findall(unlink_regex_pattern, md_content_pre)
     
     # 메타데이터용 리스트 생성

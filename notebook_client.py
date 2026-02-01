@@ -16,12 +16,6 @@ class NotebookClient:
             headers["Authorization"] = auth
         return headers
 
-    def _clean_html_tags(self, html_text: str) -> str:
-        if not html_text:
-            return ""
-        clean = re.compile('<.*?>')
-        return re.sub(clean, '', html_text)
-
     def fetch_contents(self, types: List[str], with_hidden: bool, parent_id: Optional[int] = None, page: int = 0) -> List[Dict[str, Any]]:
         params = {
             "sort": "id,DESC",
@@ -136,60 +130,3 @@ class NotebookClient:
         
         # 스냅샷 생성
         self._create_snapshot(note_id, updated_data)
-
-    def _extract_and_remove_card(self, html: str, header_text: str) -> Tuple[str, Optional[str]]:
-        pattern = re.compile(r'(<h([1-6])\b[^>]*>(.*?)</h\2>)', re.IGNORECASE | re.DOTALL)
-        matches = list(pattern.finditer(html))
-        target_match = None
-        
-        for match in matches:
-            if header_text in match.group(3):
-                target_match = match
-                break
-                
-        if not target_match:
-            return html, None
-
-        start_idx = target_match.start()
-        current_level = int(target_match.group(2))
-        end_idx = len(html)
-        
-        for match in matches:
-            if match.start() <= start_idx:
-                continue
-            if int(match.group(2)) <= current_level:
-                end_idx = match.start()
-                break
-                
-        extracted_content = html[start_idx:end_idx]
-        new_html = html[:start_idx] + html[end_idx:]
-        
-        return new_html, extracted_content
-
-    def move_kanban_card_logic(self, source_title: str, target_title: str, header_text: str) -> str:
-        """
-        칸반 카드를 이동시키고, 영향을 받은 두 노트(소스, 타겟) 모두에 대해 스냅샷을 남깁니다.
-        """
-        source_note = self.get_note_by_title(source_title)
-        target_note = self.get_note_by_title(target_title)
-        
-        if not source_note or not target_note:
-            return "Error: Source or Target note not found."
-        
-        source_html = source_note.get("description", "") or ""
-        target_html = target_note.get("description", "") or ""
-        
-        new_source_html, card_content = self._extract_and_remove_card(source_html, header_text)
-        
-        if not card_content:
-            return f"Error: Card '{header_text}' not found in '{source_title}'."
-        
-        new_target_html = target_html + "\n" + card_content
-        
-        # 1. Update Target Note & Snapshot
-        self.update_note_content(target_note["id"], target_note, new_target_html)
-        
-        # 2. Update Source Note & Snapshot
-        self.update_note_content(source_note["id"], source_note, new_source_html)
-        
-        return f"Moved card '{header_text}' from '{source_title}' to '{target_title}' and created snapshots for both."
